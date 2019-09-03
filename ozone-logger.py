@@ -2,14 +2,14 @@
 #
 # Bill Simpson (wrsimpson@alaska.edu) 3 Sep 2019
 #
-# This logger captures data from a Dasibi 1008 RS using a Raspberry Pi 
+# This logger captures data from a Dasibi 1008 RS using a Raspberry Pi
 # It uses a hardware UART serial port (/dev/serial0) on the RPi, which has
-# 0 and 3.3V logic levels and a hardware converter from those levels to 
+# 0 and 3.3V logic levels and a hardware converter from those levels to
 # RS-232 logic levels (+/- 9V) to talk with the Dasibi serial output
-# It also uses a Pimoroni Explorer PHat to log the output as an analog 
-# voltage.  The explorer phat has digital outputs that span and zero 
+# It also uses a Pimoroni Explorer PHat to log the output as an analog
+# voltage.  The explorer phat has digital outputs that span and zero
 # the Dasibi, but that also required hardware to convert the digital output
-# to +5V signals.  
+# to +5V signals.
 
 import serial
 import time
@@ -24,7 +24,7 @@ cal_span_secs = 300 # seconds to span
 cal_zero_secs = 300 # seconds to zero (after span)
 # be careful to not calibrate across midnight
 
-time_exception_secs = 100 # if time shifts more than this, there will 
+time_exception_secs = 100 # if time shifts more than this, there will
 # be a time exception and a new file will begin
 
 # set time format for datetime string in file
@@ -34,7 +34,7 @@ timeformat = '%Y-%m-%d %H:%M:%S'
 basevarnames = ['datetime', 'calmode', 'O3_volts']
 
 # specifics for reading serial port
-varnames = ['O3_ppm','fault','mode','abscoef','offset_ppb','temp_c','pres_atm','cont_hz','samp_hz']
+varnames = ['O3_ppb','fault','mode','abscoef','offset_ppb','temp_c','pres_atm','cont_hz','samp_hz']
 position = ['05;17H','07;12H','07;25H','07;38H','07;56H','08;11H','09;11H','10;11H','10;32H']
 unit = ['ppm', '', '', '', '', 'C', 'ATM', '', '']
 
@@ -78,9 +78,9 @@ while True:
     calspan = walltime.replace(hour=cal_start_hour,minute=0,second=0,
                                microsecond=0)
     # time to start zero
-    calzero = caltime + datetime.timedelta(seconds=cal_span_secs)
+    calzero = calspan + datetime.timedelta(seconds=cal_span_secs)
     # time to end calibration
-    calend = calzero + datetime.timedelta(cal_zero_secs)
+    calend = calzero + datetime.timedelta(seconds=cal_zero_secs)
     request_calmode = 0
     if walltime > calspan and walltime < calzero:
         request_calmode = 3
@@ -109,9 +109,17 @@ while True:
         except:
             pass
 
+    # read the serial's ozone and convert to ppb
+    try:
+        serialvector[0] = str(1000*float(serialvector[0]))
+    except:
+        if len(serialvector)>0:
+            serialvector[0] = 'NaN'
+    # check if there are the right number of elements in the serial vector
     valid_serial_data = (len(serialvector) == 9)
 
     secs_since_write = time.monotonic() - lastwrite_monotonic
+#    print('secs_since_write ='+str(secs_since_write))
     if valid_serial_data or ( secs_since_write > write_interval_secs ) :
         # write some new data
         if not outfile_open:
@@ -141,9 +149,11 @@ while True:
         totalvector = basedata + serialvector
         # write totaldata vector
         outfile.write('\t'.join(totalvector)+'\n')
+        # output to console in case anybody is there
+        print('\t'.join(totalvector))
         # check if time shifted by more than allowed
         curr_dt = datetime.datetime.now()
-        diff_secs = (pred_dt - curr_dt).total_seconds()
+        diff_secs = (curr_dt - pred_dt).total_seconds()
 
         if abs(diff_secs) > time_exception_secs:
             exception_string = 'Time shift exception -- computer time is: '
@@ -165,3 +175,4 @@ while True:
         last_dt = curr_dt
         # set the lastwrite seconds to now
         lastwrite_monotonic = time.monotonic() 
+
