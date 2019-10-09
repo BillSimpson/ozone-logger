@@ -14,12 +14,11 @@
 import serial
 import time
 import datetime
+import os
 
 # control variables
-write_interval_secs = 50 # will write a data line about this often
-# even if serial port fails to report digital data
 
-cal_start_hour = 12 # cal starts at hour:00 in the native timezone
+cal_start_hour = 15 # cal starts at hour:00 in the native timezone
 cal_span_secs = 300 # seconds to span
 cal_zero_secs = 300 # seconds to zero (after span)
 # be careful to not calibrate across midnight
@@ -29,6 +28,16 @@ time_exception_secs = 100 # if time shifts more than this, there will
 
 # set time format for datetime string in file
 timeformat = '%Y-%m-%d %H:%M:%S'
+
+# set the number of seconds between file writes (flushing of the buffer)
+flush_after_secs = 60
+
+# newfile file path: if you "touch" this filename, the program will close the
+# current file
+newfile_path = os.path.expanduser('~/new_file')
+
+# put the output into the report directory
+reppath = os.path.expanduser('~/rep/')
 
 # specifics for analog read, calmode, and time
 basevarnames = ['datetime', 'calmode', 'O3_volts']
@@ -66,6 +75,7 @@ headernames = basevarnames + varnames
 
 # set last write monotonic time to now
 lastwrite_monotonic = time.monotonic()
+lastflush_monotonic = time.monotonic()
 
 # indicate outfile is not open
 outfile_open = False
@@ -97,7 +107,12 @@ while True:
 
     # now read serial data
     datline = ser.readline().decode()
-    serialvector = []
+    if datline == b'':
+        # serial port returned no data, try to put into diagnostic mode
+        ser.write(b'd')
+
+    # prepare vector for data that can be parsed
+    serialvector = [''] * 9
 
     for ix, loc in enumerate(position):
         try:
@@ -105,7 +120,7 @@ while True:
             if strloc > -1:
                 dataval = datline[(strloc+9):].strip().split('\x1b[')[0]
                 if dataval.find(unit[ix]) > -1:
-                    serialvector.append(dataval.split(' ')[0])
+                    serialvector[ix] = dataval.split(' ')[0]
         except:
             pass
 
@@ -113,66 +128,67 @@ while True:
     try:
         serialvector[0] = str(1000*float(serialvector[0]))
     except:
-        if len(serialvector)>0:
-            serialvector[0] = 'NaN'
-    # check if there are the right number of elements in the serial vector
-    valid_serial_data = (len(serialvector) == 9)
+        serialvector[0] = 'NaN'
 
     secs_since_write = time.monotonic() - lastwrite_monotonic
-#    print('secs_since_write ='+str(secs_since_write))
-    if valid_serial_data or ( secs_since_write > write_interval_secs ) :
-        # write some new data
-        if not outfile_open:
-            outfilename = datetime.datetime.now().strftime('ozone-log-%Y%m%dT%H%M%S.txt')
-            outfile = open(outfilename,'w')
-            # write the header line
-            outfile.write('\t'.join(headernames)+'\n')
-            outfile_open = True
-            # set last datetime to now
-            last_dt = datetime.datetime.now()
-            secs_since_write = 0
-        # write the data line
-        pred_dt = last_dt + datetime.timedelta(seconds=secs_since_write)
-        if not valid_serial_data:
-            serialvector = ['NaN'] * 9  # fill values with NaNs
-            # try to get the serial port into diagnostic mode
-            ser.write('d'.encode())
-        # build the base data
-        basedata = []
-        basedata.append(pred_dt.strftime(timeformat))
-        # calculate actual calmode
-        calmode = int(span.is_on()) << 1 | int(zero.is_on())
-        # add to base data vector
-        basedata.append(str(calmode))
-        basedata.append(str(O3_volts.read()))
-        # concatenate to total vector of base + serial vector
-        totalvector = basedata + serialvector
-        # write totaldata vector
-        outfile.write('\t'.join(totalvector)+'\n')
-        # output to console in case anybody is there
-        print('\t'.join(totalvector))
-        # check if time shifted by more than allowed
-        curr_dt = datetime.datetime.now()
-        diff_secs = (curr_dt - pred_dt).total_seconds()
+    secs_since_flush = time.monotonic() - lastflush_monotonic
+    # write some new data
+    if not outfile_open:
+        outfilename = datetime.datetime.now().strftime('ozone-log-%Y%m%dT%H%M%S.txt')
+        outfile = open(os.path.join(reppath, outfilename), 'w')
+        # write the header line
+        outfile.write('\t'.join(headernames)+'\n')
+        outfile_open = True
+        # set last datetime to now
+        last_dt = datetime.datetime.now()
+        secs_since_write = 0
+        secs_since_flush = 0
+    # write the data line
+    pred_dt = last_dt + datetime.timedelta(seconds=secs_since_write)
+    # build the base data
+    basedata = [''] * 3   # three elements in base data
+    basedata[0] = pred_dt.strftime(timeformat)
+    # calculate actual calmode
+    calmode = int(span.is_on()) << 1 | int(zero.is_on())
+    # add to base data vector
+    basedata[1] = str(calmode)
+    basedata[2] = str(O3_volts.read())
+    # concatenate to total vector of base + serial vector
+    totalvector = basedata + serialvector
+    # write totaldata vector
+    outfile.write('\t'.join(totalvector)+'\n')
+    # check if we should flush the buffer (force a write to the file)
+    if secs_since_flush > flush_after_secs:
+        outfile.flush()
+        lastflush_monotonic = time.monotonic()
+    # output to console in case anybody is there
+    print('\t'.join(totalvector))
+    # check if time shifted by more than allowed
+    curr_dt = datetime.datetime.now()
+    diff_secs = (curr_dt - pred_dt).total_seconds()
 
-        if abs(diff_secs) > time_exception_secs:
-            exception_string = 'Time shift exception -- computer time is: '
-            exception_string += curr_dt.strftime(timeformat)
-            exception_string += ' predicted time was: '
-            exception_string += pred_dt.strftime(timeformat)
-            exception_string += ' seconds time shifted = '
-            exception_string += str(diff_secs)+'\n'
-            outfile.write(exception_string)
+    if abs(diff_secs) > time_exception_secs:
+        exception_string = 'Time shift exception -- computer time is: '
+        exception_string += curr_dt.strftime(timeformat)
+        exception_string += ' predicted time was: '
+        exception_string += pred_dt.strftime(timeformat)
+        exception_string += ' seconds time shifted = '
+        exception_string += str(diff_secs)+'\n'
+        outfile.write(exception_string)
+        outfile.close()
+        outfile_open = False
+    else:
+        # if a new file is requested, do that
+        newfile_request = os.path.exists(newfile_path) and os.path.isfile(newfile_path)
+        # if date changes, close the old file and let a new one open
+        if newfile_request or last_dt.date() < curr_dt.date():
             outfile.close()
             outfile_open = False
-        else:
-            # if date changes, close the old file and let a new one open
-            if last_dt.date() < curr_dt.date():
-                outfile.close()
-                outfile_open = False
+            if newfile_request:
+                os.remove(newfile_path)
 
-        # set last_dt from current write time
-        last_dt = curr_dt
-        # set the lastwrite seconds to now
-        lastwrite_monotonic = time.monotonic() 
+    # set last_dt from current write time
+    last_dt = curr_dt
+    # set the lastwrite seconds to now
+    lastwrite_monotonic = time.monotonic()
 
